@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from django.contrib.auth.models import User
-
+from .models import Profile
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
@@ -13,3 +13,13 @@ class UserSerializer(serializers.ModelSerializer):
             password=validated_data['password']
         )
         return user
+    
+class ProfileSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Profile
+        fields = ['username', 'image']
+
+        def validate_user(self, value):
+            if Profile.objects.filter(user=value).exists():
+                raise serializers.ValidationError("A profile for this user already exists.")
+            return value

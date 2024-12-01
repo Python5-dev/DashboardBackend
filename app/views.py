@@ -3,16 +3,20 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework import status
 from django.contrib.auth.models import User
-from .serializers import UserSerializer
+from .serializers import UserSerializer, ProfileSerializer
 from django.db import IntegrityError
 from django.contrib.auth import authenticate
-from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.tokens import RefreshToken, UntypedToken
 from.email import send_reset_password_email
 from django.utils.http import urlsafe_base64_decode
 from django.contrib.auth.tokens import PasswordResetTokenGenerator
 from django.contrib.auth.hashers import make_password
 from django.utils import timezone
 from datetime import timedelta
+from rest_framework.test import APIRequestFactory
+from rest_framework_simplejwt.exceptions import TokenError
+from .models import Profile
+from rest_framework.generics import CreateAPIView, RetrieveAPIView, UpdateAPIView, DestroyAPIView
 
 class Register(APIView):
     permission_classes = [AllowAny]
@@ -88,7 +92,7 @@ class ResetPassword(APIView):
             return True
         return False
     
-    def post(self, request):
+    def update(self, request):
         uidb64 = request.data.get('uid')
         token = request.data.get('token')
         new_password = request.data.get('newPassword')
@@ -108,3 +112,87 @@ class ResetPassword(APIView):
                 return Response({"error": "Invalid or expired token."}, status=status.HTTP_400_BAD_REQUEST)
         except (User.DoesNotExist, ValueError, TypeError):
             return Response({"error": "Invalid user."}, status=status.HTTP_400_BAD_REQUEST)
+
+class Dashboard(APIView):
+    def post(self, request):
+        jwt_token = request.headers.get('Authorization')
+
+        if not jwt_token or not jwt_token.startswith("Bearer "):
+            return Response({'error': 'Invalid or missing Authorization header.'}, status=status.HTTP_400_BAD_REQUEST)
+        jwt_token = jwt_token.split(" ")[1]
+
+        try:
+            # verify the JWT token
+            verified_token = UntypedToken(jwt_token)
+            user_id = verified_token.payload.get('user_id')
+            user = User.objects.get(id=user_id)
+
+            if user.is_staff:
+                users = User.objects.all()
+                serializer = UserSerializer(users, many=True)
+                return Response({
+                    'access': jwt_token,
+                    'users': serializer.data
+                }, status=status.HTTP_200_OK)
+
+            return self.get_user_profile(user)
+
+        except TokenError as e:
+            return self.handle_token_error(e, request)
+
+    def get_user_profile(self, user):
+        factory = APIRequestFactory()
+        drf_request = factory.get(f'/profile/{user.username}/')
+        view = RetrieveProfile.as_view()
+        return view(drf_request, username=user.username)
+    
+    # Generate Refresh Token if access token has expired
+    def handle_token_error(self, error, request):
+        if str(error) == "Token is invalid or expired":
+            refresh_token = request.data.get('refresh')
+            if not refresh_token:
+                return Response({'error': 'Refresh token required for reauthentication.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            try:
+                refresh = RefreshToken(refresh_token)
+                new_access_token = str(refresh.access_token)
+                return Response({'message': 'Token refreshed successfully.', 'access': new_access_token}, status=status.HTTP_200_OK)
+
+            except TokenError as e:
+                return Response({'error': 'Refresh token invalid or expired.', 'details': str(e)}, status=status.HTTP_401_UNAUTHORIZED)
+
+        return Response({'error': 'Invalid token.', 'details': str(error)}, status=status.HTTP_401_UNAUTHORIZED)
+
+class DeleteUser(DestroyAPIView):
+    queryset = User.objects.all()
+    lookup_field = 'username'
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        self.perform_destroy(instance)
+        return Response({'message': 'User Deleted Successfully'}, status=status.HTTP_200_OK)
+
+class RetrieveProfile(RetrieveAPIView): 
+    queryset = Profile.objects.all()
+    serializer_class = ProfileSerializer
+    lookup_field = 'username'
+
+class UpdateProfile(UpdateAPIView):
+    queryset = Profile.objects.all()
+    serializer_class = ProfileSerializer
+    lookup_field = 'username'
+
+    def update(self, request, *args, **kwargs):
+        instance = self.get_object()
+        self.perform_update(instance)
+        return Response({'message': 'Profile Updated Successfully'}, status=status.HTTP_200_OK)
+
+class DeleteProfile(DestroyAPIView):
+    queryset = Profile.objects.all()
+    serializer_class = ProfileSerializer
+    lookup_field = 'username'
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        self.perform_destroy(instance)
+        return Response({'message': 'Profile Deleted Successfully'}, status=status.HTTP_200_OK)
